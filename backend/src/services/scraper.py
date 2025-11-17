@@ -1,6 +1,5 @@
 """
-Scraper d'articles via RSS pour différentes thématiques.
-Collecte fiable via flux RSS + récupération du texte quand possible.
+Scraper d'articles
 """
 
 import requests
