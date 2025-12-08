@@ -1,79 +1,72 @@
 """
-Module d'analyse de sentiment pour les articles.
-Utilise TextBlob pour déterminer le sentiment d'un texte.
+Module d'analyse de sentiment basé sur Hugging Face Transformers (BERT).
+Plus lent que TextBlob, mais beaucoup plus intelligent pour le contexte.
 """
-
-from textblob import TextBlob
-from typing import List, Union
-from backend.src.services.scraper.py import ArticleData  # adapte le chemin si besoin
+from transformers import pipeline
 import logging
 
-logger = logging.getLogger(__name__)
-
+# On réduit le bruit des logs de transformers
+logging.getLogger("transformers").setLevel(logging.ERROR)
 
 class SentimentAnalyzer:
-    """Classe pour analyser le sentiment des articles."""
+    """
+    Utilise un modèle BERT multilingue pour classer le sentiment.
+    Le modèle retourne un score en 'étoiles' (1 star à 5 stars).
+    """
+    
+    def __init__(self):
+        print("Chargement du modèle neuronal (cela peut prendre quelques secondes)...")
+        # On utilise un modèle spécialisé qui gère le français, l'anglais, etc.
+        # Il va être téléchargé automatiquement au premier lancement.
+        model_name = "nlptown/bert-base-multilingual-uncased-sentiment"
+        self.pipe = pipeline("sentiment-analysis", model=model_name)
 
-    def analyze_text(self, text: str) -> dict:
+    def analyze(self, text: str) -> tuple[float, str]:
         """
-        Analyse le sentiment d'un texte.
-        Retourne un dictionnaire avec polarity et subjectivity.
-        Polarity: [-1,1] négatif -> positif
-        Subjectivity: [0,1] objectif -> subjectif
+        Retourne :
+        - un score normalisé entre -1 (négatif) et 1 (positif)
+        - un label ("négatif", "neutre", "positif")
         """
+        if not text or len(text.strip()) < 5:
+            return 0.0, "neutre"
+
         try:
-            blob = TextBlob(text)
-            return {
-                "polarity": blob.sentiment.polarity,
-                "subjectivity": blob.sentiment.subjectivity
-            }
-        except Exception as e:
-            logger.error(f"Erreur analyse sentiment: {e}")
-            return {"polarity": 0.0, "subjectivity": 0.0}
+            # Les modèles BERT ont une limite de longueur (souvent 512 tokens).
+            # On tronque le texte pour éviter les erreurs.
+            result = self.pipe(text[:512])[0]
+            
+            # Le résultat ressemble à : {'label': '1 star', 'score': 0.95}
+            label_star = result['label']  # ex: '1 star', '4 stars'
+            confidence = result['score']  # certitude de l'IA (0 à 1)
 
-    def analyze_articles(
-        self, articles: List[Union[ArticleData, dict]]
-    ) -> List[Union[ArticleData, dict]]:
-        """
-        Analyse le sentiment pour chaque article et ajoute le résultat dans une clé 'sentiment'.
-        """
-        for article in articles:
-            text = article.text if isinstance(article, ArticleData) else article.get("text", "")
-            sentiment = self.analyze_text(text)
-            if isinstance(article, ArticleData):
-                article.sentiment = sentiment  # on peut ajouter un attribut dynamique
+            # --- CONVERSION DU SYSTÈME D'ÉTOILES EN POLARITÉ ---
+            # 1 star  = Très Négatif
+            # 2 stars = Négatif
+            # 3 stars = Neutre
+            # 4 stars = Positif
+            # 5 stars = Très Positif
+            
+            stars = int(label_star.split()[0]) # On récupère juste le chiffre
+            
+            # On mappe 1..5 vers -1..1
+            # 1 -> -1.0
+            # 2 -> -0.5
+            # 3 ->  0.0
+            # 4 -> +0.5
+            # 5 -> +1.0
+            normalized_score = (stars - 3) / 2.0
+
+            # Définition du label textuel pour ton interface
+            if stars <= 2:
+                final_label = "négatif"
+            elif stars == 3:
+                final_label = "neutre"
             else:
-                article["sentiment"] = sentiment
-        return articles
+                final_label = "positif"
 
+            return normalized_score, final_label
 
-# =======================
-# Exemple d'utilisation
-# =======================
-if __name__ == "__main__":
-    import logging
-    logging.basicConfig(level=logging.INFO)
-
-    # Exemple simple
-    sample_articles = [
-        ArticleData(
-            title="Exemple positif",
-            url="http://exemple.com",
-            source="test",
-            topic="économie",
-            text="Le marché est en plein essor et les investisseurs sont ravis."
-        ),
-        ArticleData(
-            title="Exemple négatif",
-            url="http://exemple.com",
-            source="test",
-            topic="économie",
-            text="La crise économique provoque beaucoup d'inquiétude chez les citoyens."
-        )
-    ]
-
-    analyzer = SentimentAnalyzer()
-    analyzed = analyzer.analyze_articles(sample_articles)
-
-    for a in analyzed:
-        print(f"{a.title}: {a.sentiment}")
+        except Exception as e:
+            # En cas de pépin, on reste neutre
+            print(f"Erreur analyse BERT : {e}")
+            return 0.0, "neutre"

@@ -5,24 +5,24 @@ from typing import List, Dict, Optional
 from datetime import datetime, timedelta
 import logging
 
-# Imports pour l'interface
+# Imports Interface
 from rich.console import Console
 from rich.table import Table
 from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn
 from rich import box
-from rich.text import Text
 from rich.align import Align
+
+# === IMPORT DE TON MODULE PERSO ===
+from sentiment_analyzer import SentimentAnalyzer
 
 logger = logging.getLogger(__name__)
 
 # ============================================================
-#                 STRUCTURE DES DONNÉES (INCHANGÉ)
+#                 STRUCTURE DES DONNÉES
 # ============================================================
 
 class ArticleData:
-    """Structure de données pour un article."""
-    
     def __init__(
         self,
         title: str,
@@ -31,7 +31,9 @@ class ArticleData:
         topic: str,
         published_date: Optional[datetime] = None,
         text: Optional[str] = None,
-        authors: Optional[List[str]] = None,
+        # Champs pour le sentiment
+        sentiment_score: float = 0.0,
+        sentiment_label: str = "neutre"
     ):
         self.title = title
         self.url = url
@@ -39,215 +41,149 @@ class ArticleData:
         self.topic = topic
         self.published_date = published_date or datetime.now()
         self.text = text or ""
-        self.authors = authors or []
-        self.scraped_at = datetime.now()
-    
-    def to_dict(self) -> Dict:
-        return {
-            "title": self.title,
-            "url": self.url,
-            "source": self.source,
-            "topic": self.topic,
-            "published_date": self.published_date.isoformat(),
-            "text": self.text,
-            "authors": self.authors,
-            "scraped_at": self.scraped_at.isoformat(),
-        }
-
+        self.sentiment_score = sentiment_score
+        self.sentiment_label = sentiment_label
 
 # ============================================================
-#                      SCRAPER RSS (INCHANGÉ)
+#                      SCRAPER RSS
 # ============================================================
 
 class RSSScraper:
-    
     RSS_FEEDS = {
         "économie": {
             "lesechos": "https://news.google.com/rss/search?q=site:lesechos.fr+économie&hl=fr&gl=FR&ceid=FR:fr",
             "latribune": "https://news.google.com/rss/search?q=site:latribune.fr+économie&hl=fr&gl=FR&ceid=FR:fr",
-            "challenges": "https://news.google.com/rss/search?q=site:challenges.fr+économie&hl=fr&gl=FR&ceid=FR:fr"
         },
         "climat": {
             "lemonde_planete": "https://www.lemonde.fr/planete/rss_full.xml",
             "reporterre": "https://reporterre.net/spip.php?page=backend",
-            "liberation_env": "https://www.liberation.fr/arc/outboundfeeds/rss/category/environnement/"
         },
-        "politique française": {
-            "lemonde_pol": "https://www.lemonde.fr/politique/rss_full.xml",
-            "liberation_pol": "https://www.liberation.fr/arc/outboundfeeds/rss/category/politique/",
+        "politique": {
             "lefigaro_pol": "https://www.lefigaro.fr/rss/figaro_politique.xml",
+            "liberation_pol": "https://www.liberation.fr/arc/outboundfeeds/rss/category/politique/",
         },
         "géopolitique": {
-            "lemonde_inter": "https://www.lemonde.fr/international/rss_full.xml",
             "courrierinter": "https://www.courrierinternational.com/feed/all/rss.xml",
             "diploweb": "https://www.diploweb.com/spip.php?page=backend",
         },
     }
 
-    def __init__(self, max_articles_per_topic: int = 5):
+    def __init__(self, max_articles_per_topic: int = 3):
         self.max_articles_per_topic = max_articles_per_topic
         self.session = requests.Session()
-        self.session.headers.update({
-            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:120.0) Gecko/20100101 Firefox/120.0"
-        })
+        self.session.headers.update({"User-Agent": "BotActu/1.0"})
+        
+        # Instanciation de l'analyzer importé
+        self.analyzer = SentimentAnalyzer()
 
     def fetch_article_text(self, url: str) -> str:
+        """Récupère le texte brut si possible."""
         try:
-            r = self.session.get(url, timeout=10)
+            r = self.session.get(url, timeout=4)
             r.raise_for_status()
             soup = BeautifulSoup(r.text, "html.parser")
-            article_tag = (
-                soup.find("article")
-                or soup.find("div", class_="article__content")
-                or soup.find("div", class_="content")
-                or soup.find("div", {"id": "content"})
-            )
-            if article_tag:
-                return article_tag.get_text(" ", strip=True)
+            # Sélecteurs génériques
+            tags = ["article", "main", "div.content", "div.post-content", "div#content"]
+            for t in tags:
+                content = soup.select_one(t)
+                if content:
+                    return content.get_text(" ", strip=True)
             return ""
-        except Exception as e:
-            logger.error(f"Impossible d'extraire le texte de {url}: {e}")
+        except Exception:
             return ""
-
-    def scrape_feed(self, feed_name: str, feed_url: str, topic: str) -> List[ArticleData]:
-        # logger.info(...) -> Commenté pour garder l'interface propre
-        articles = []
-        feed = feedparser.parse(feed_url)
-        if feed.bozo:
-            return articles
-
-        for entry in feed.entries[: self.max_articles_per_topic]:
-            try:
-                title = entry.title
-                link = entry.link
-                published = None
-                if hasattr(entry, "published_parsed") and entry.published_parsed:
-                    published = datetime(*entry.published_parsed[:6])
-                
-                # Note: fetch_article_text peut être lent, ce qui ralentit l'UI
-                text = self.fetch_article_text(link)
-                authors = [entry.author] if "author" in entry else []
-
-                articles.append(ArticleData(title, link, feed_name, topic, published, text, authors))
-            except Exception:
-                pass
-        return articles
 
     def scrape_topic(self, topic: str) -> List[ArticleData]:
-        topic_feeds = self.RSS_FEEDS.get(topic, {})
-        collected = []
-        for feed_name, feed_url in topic_feeds.items():
-            collected.extend(self.scrape_feed(feed_name, feed_url, topic))
-        return collected[: self.max_articles_per_topic]
+        articles = []
+        feeds = self.RSS_FEEDS.get(topic, {})
+        
+        for feed_name, feed_url in feeds.items():
+            feed = feedparser.parse(feed_url)
+            if feed.bozo: continue
 
-    def scrape_all_topics(self, topics: List[str]) -> Dict[str, List[ArticleData]]:
-        results = {}
-        for topic in topics:
-            results[topic] = self.scrape_topic(topic)
-        return results
+            for entry in feed.entries:
+                if len(articles) >= self.max_articles_per_topic: break
+                
+                try:
+                    title = entry.title
+                    link = entry.link
+                    published = None
+                    if hasattr(entry, "published_parsed") and entry.published_parsed:
+                        published = datetime(*entry.published_parsed[:6])
 
+                    # 1. Récupération du texte
+                    full_text = self.fetch_article_text(link)
+                    
+                    # 2. Préparation du texte à analyser (fallback sur titre si texte vide)
+                    text_to_analyze = full_text if len(full_text) > 100 else f"{title} {entry.get('description', '')}"
+                    
+                    # 3. Appel au module d'analyse externe
+                    score, label = self.analyzer.analyze(text_to_analyze)
+
+                    articles.append(ArticleData(
+                        title=title, url=link, source=feed_name, topic=topic,
+                        published_date=published, text=full_text,
+                        sentiment_score=score, sentiment_label=label
+                    ))
+                except Exception:
+                    continue
+                    
+            if len(articles) >= self.max_articles_per_topic: break
+            
+        return articles
 
 # ============================================================
-#              INTERFACE UTILISATEUR (RICH UI)
+#              INTERFACE UTILISATEUR (MAIN)
 # ============================================================
 
 if __name__ == "__main__":
-    # On met le logging en WARNING ou ERROR pour ne pas polluer l'interface visuelle
     logging.basicConfig(level=logging.ERROR)
-    
     console = Console()
     
-    # Configuration
     scraper = RSSScraper(max_articles_per_topic=3)
-    topics = ["économie", "climat", "politique française", "géopolitique"]
+    topics = ["économie", "climat", "politique", "géopolitique"]
 
-    # --- 1. En-tête (Header) ---
-    header_text = Text("🗞️  AGRÉGATEUR RSS INTELLIGENT", style="bold white")
-    console.print(Panel(
-        Align.center(header_text),
-        border_style="blue",
-        padding=(1, 2)
-    ))
+    # --- Header ---
+    console.print(Panel(Align.center("[bold white]🤖 BOT ACTU & SENTIMENT[/]"), border_style="blue"))
 
-    # --- 2. Scraping avec barre de progression ---
+    # --- Processus ---
     results = {}
-    
-    # Utilisation d'une barre de progression plus détaillée
     with Progress(
         SpinnerColumn(style="cyan"),
         TextColumn("[bold blue]{task.description}"),
-        BarColumn(bar_width=None, style="blue", complete_style="green"),
+        BarColumn(bar_width=None, style="blue"),
         TaskProgressColumn(),
         console=console,
-        transient=True # Disparaît à la fin pour laisser place aux résultats
+        transient=True
     ) as progress:
-        
-        main_task = progress.add_task("Analyse des flux...", total=len(topics))
-        
+        task = progress.add_task("Analyse...", total=len(topics))
         for topic in topics:
-            progress.update(main_task, description=f"Scraping : [bold]{topic.upper()}[/]")
-            
-            # On appelle scrape_topic directement ici pour mettre à jour la barre
-            # au fur et à mesure, plutôt que tout attendre d'un coup.
-            topic_results = scraper.scrape_topic(topic)
-            results[topic] = topic_results
-            
-            progress.advance(main_task)
+            progress.update(task, description=f"Analyse du sujet : [bold]{topic.upper()}[/]")
+            results[topic] = scraper.scrape_topic(topic)
+            progress.advance(task)
 
-    # --- 3. Affichage des résultats (Tables) ---
-    console.print("\n") # Petit espace après le chargement
+    # --- Affichage Tableau ---
+    console.print("\n")
+    for topic, items in results.items():
+        if not items: continue
 
-    total_articles = sum(len(items) for items in results.values())
-    
-    if total_articles == 0:
-        console.print(Panel("Aucun article trouvé. Vérifiez votre connexion.", style="red"))
-    else:
-        for topic, items in results.items():
-            if not items:
-                continue
+        table = Table(
+            title=f"Sujet : [bold cyan]{topic.upper()}[/]",
+            box=box.ROUNDED, expand=True, show_lines=True, header_style="bold white on blue"
+        )
+        table.add_column("Humeur", justify="center", width=12)
+        table.add_column("Article", style="white", ratio=4)
+        table.add_column("Lien", justify="center", width=8)
 
-            # Création du tableau principal pour la catégorie
-            table = Table(
-                title=f"CATEGORY : [bold underline cyan]{topic.upper()}[/]",
-                title_justify="left",
-                box=box.ROUNDED,      # Bords arrondis modernes
-                expand=True,          # Prend toute la largeur du terminal
-                header_style="bold white on blue",
-                border_style="bright_black",
-                show_lines=True,      # Ligne de séparation entre chaque article
-                padding=(0, 1)
-            )
+        for a in items:
+            # Code couleur pour l'humeur
+            if a.sentiment_label == "positif":
+                mood = f"🟢 [bold green]Positif[/]\n[dim]{a.sentiment_score:.2f}[/]"
+            elif a.sentiment_label == "négatif":
+                mood = f"🔴 [bold red]Négatif[/]\n[dim]{a.sentiment_score:.2f}[/]"
+            else:
+                mood = f"⚪ [dim]Neutre[/]\n[dim]{a.sentiment_score:.2f}[/]"
 
-            # --- Définition des colonnes intelligentes ---
-            # Colonne 1 : Métadonnées (Source + Date) combinées pour gagner de la place
-            table.add_column("Source & Date", justify="right", style="dim", width=18)
-            
-            # Colonne 2 : Le Titre (prend le plus de place)
-            table.add_column("Titre de l'article", style="white", ratio=4, overflow="fold")
-            
-            # Colonne 3 : Le Lien (cliquable)
-            table.add_column("Lien", style="blue", justify="center", width=10)
+            table.add_row(mood, f"[bold]{a.title}[/]\n[italic green]{a.source}[/]", f"[link={a.url}]Voir ↗[/]")
 
-            for a in items:
-                # Formatage date
-                date_str = "Récent"
-                if a.published_date:
-                    date_str = a.published_date.strftime("%d/%m %H:%M")
-                
-                # Formatage métadonnées (Source en gras vert, Date en dessous)
-                meta_info = f"[bold green]{a.source}[/]\n{date_str}"
-                
-                # Lien cliquable avec texte court
-                link_btn = f"[link={a.url}][bold blue]Ouvrir ↗[/][/link]"
-
-                table.add_row(
-                    meta_info,
-                    a.title,
-                    link_btn
-                )
-
-            console.print(table)
-            console.print("\n") # Espace entre les tableaux
-
-    # --- Footer ---
-    console.print(f"[dim italic right]Fin du rapport • {total_articles} articles extraits • {datetime.now().strftime('%H:%M:%S')}[/dim italic right]")
+        console.print(table)
+        console.print("\n")

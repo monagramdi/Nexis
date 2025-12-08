@@ -44,3 +44,11 @@ flake8==6.1.0
 mypy==1.7.1
 
 feedparser==6.0.10
+textblob==0.17.1
+
+requests
+feedparser
+beautifulsoup4
+rich
+transformers
+torch
